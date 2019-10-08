@@ -27,10 +27,11 @@ import numpy as np
 
 # Physical constants
 TCELS = 273.15  # 0 Celsius in K
+PATM = 101325.  # 1 atm in Pa
 GRAV = 9.80665  # Standard gravity, m s-2
 CSEA = 3991.86795711963  # Standard heat capacity of seawater, J kg-1 K-1
-SNORM = 35.16504  # Salinity of KCl-normalized seawater, g kg-1
-SRED = SNORM * 40./35.  # Reducing salinity, g kg-1
+SAL0 = 35.16504  # Salinity of KCl-normalized seawater, g kg-1
+SRED = SAL0 * 40./35.  # Reducing salinity, g kg-1
 TRED = 40.  # Reducing temperature, deg C
 ZRED = 1e4  # Reducing depth, m
 PRED = 1e4  # Reducing pressure, dbar
@@ -39,6 +40,8 @@ SNDFACTOR = (PRED*DBAR2PA)**.5  # Coefficient in speed of sound, Pa(.5)
 RHOBSQ = 1020.  # Reference density for depth-pressure conversion, kg/m3
 DTASBSQ = 32.  # Salinity offset for Boussinesq formulation, g kg-1
 DTASCMP = 24.  # Salinity offset for compressile formulation, g kg-1
+TTP = 273.16  # Triple point temperature in K
+PTP = 611.657  # Triple point pressure in Pa
 
 
 # Number of terms in each polynomial expansion
@@ -46,7 +49,8 @@ NSTBSQ = (6, 4, 2, 1)
 NSTC75 = (6, 5, 4, 2, 1, 0)
 NGWAT = (7, 7, 6, 6, 5, 3, 0)
 NGSAL0 = (1,)
-NGSAL1 = (0, 0, 7, 5, 5, 1, 1, 0)
+NGSAL1 = (1,)
+NGSAL2 = (0, 0, 7, 5, 5, 1, 1, 0)
 
 # Global dictionary of coefficients
 COEFS = dict()
@@ -595,7 +599,7 @@ def eos_c75(salt, tcon, pres):
 
 
 # Gibbs function formulation
-def gibbs_wat(temp, pres, dt, dp):
+def gibbs_wat(temp, pres, dt, dp, orig=False):
     """Calculate the Gibbs function for pure water.
 
     Calculate the Gibbs function for pure water from the in-situ temperature
@@ -607,6 +611,10 @@ def gibbs_wat(temp, pres, dt, dp):
             minus 1 atm).
         dt, dp (int >= 0): Number of temperature and pressure derivatives to
             take.
+        orig (bool, optional): If True, the original coefficients for the Gibbs
+            function are used. If False (default), then adjusted coefficients
+            are used which satisfy that the entropy and internal energy of pure
+            water are 0 at the triple point.
 
     Returns:
         g (float or array): Gibbs free energy of pure water, in units of
@@ -616,13 +624,18 @@ def gibbs_wat(temp, pres, dt, dp):
     y = temp / TRED
     z = pres / PRED
     # Calculate polynomial
-    g = poly2d_der(y, z, dt, dp, COEFS['GWAT'], NGWAT)
+    if dp == 0:
+        name0 = 'GWAT0_' + ('ORIG' if orig else 'TRUE')
+        g0 = poly1d_der(y, dt, COEFS[name0])
+    else:
+        g0 = 0.
+    g1 = poly2d_der(y, z, dt, dp, COEFS['GWAT1'], NGWAT)
     # Scale value to match derivatives
-    g /= TRED**dt * PRED**dp
+    g = (g0 + g1) / (TRED**dt * PRED**dp)
     return g
 
 
-def gibbs_sal(salt, temp, pres, ds, dt, dp):
+def gibbs_sal(salt, temp, pres, ds, dt, dp, orig=False):
     """Calculate the Gibbs function for salt in seawater.
 
     Calculate the Gibbs function for salt in seawater from the absolute
@@ -636,6 +649,10 @@ def gibbs_sal(salt, temp, pres, ds, dt, dp):
             minus 1 atm).
         ds, dt, dp (int >= 0): Number of salinity, temperature, and pressure
             derivatives to take.
+        orig (bool, optional): If True, the original coefficients for the Gibbs
+            function are used. If False (default), then adjusted coefficients
+            are used which satisfy that the entropy and enthalpy of seawater
+            are 0 under standard conditions.
 
     Returns:
         g (float or array): Gibbs free energy of salt, in units of
@@ -659,10 +676,10 @@ def gibbs_sal(salt, temp, pres, ds, dt, dp):
                 # Calculate g2_tp
                 y = temp / TRED
                 z = pres / PRED
-                jkmax = NGSAL1[2]
+                jkmax = NGSAL2[2]
                 njs = tuple((jkmax+1-k) for k in range(jkmax+1))
                 njk = ((jkmax+1)*(jkmax+2))//2
-                g2 = poly2d_der(y, z, dt, dp, COEFS['GSAL1'][2:njk+2], njs)
+                g2 = poly2d_der(y, z, dt, dp, COEFS['GSAL2'][2:njk+2], njs)
                 g = g2 / SRED / TRED**dt / PRED**dp
                 return g
             else:
@@ -674,34 +691,93 @@ def gibbs_sal(salt, temp, pres, ds, dt, dp):
     y = temp / TRED
     z = pres / PRED
     # Calculate logarithmic salinity term
-    g1yz = poly2d_der(y, z, dt, dp, COEFS['GSAL0'], NGSAL0)/2/SRED
+    g0yz = poly2d_der(y, z, dt, dp, COEFS['GSAL0'], (1,))/2/SRED
     if ds == 0:
-        g1 = g1yz * salt * np.log(salt/SRED)
+        g0 = g0yz * salt * np.log(salt/SRED)
     elif ds == 1:
-        g1 = g1yz * (1 + np.log(salt/SRED))
+        g0 = g0yz * (1 + np.log(salt/SRED))
     else:
         sinv = 1./salt
-        g1 = g1yz * sinv
+        g0 = g0yz * sinv
         for i in range(1, ds-1):
-            g1 *= -i*sinv
+            g0 *= -i*sinv
+    # Calculate the linear, adjustable salinity terms
+    if (ds > 1) or (dt > 1) or (dp > 0):
+        g1 = 0.
+    else:
+        name1 = 'GSAL1_' + ('ORIG' if orig else 'TRUE')
+        g1 = poly1d_der(y, dt, COEFS[name1]) * salt**(ds == 0) / SRED
     # Calculate the other salinity terms
     g2 = 0.
-    imax = len(NGSAL1) - 1
+    imax = len(NGSAL2) - 1
     ind = 0
-    for (i1, jkmax) in enumerate(NGSAL1[-1::-1]):
+    for (i1, jkmax) in enumerate(NGSAL2[-1::-1]):
         i = imax-i1
         njs = tuple((jkmax-k) for k in range(jkmax+1))
         njk = ((jkmax+1)*(jkmax+2))//2
         inds = slice(ind-njk, (ind if ind < 0 else None))
-        coefs = COEFS['GSAL1'][inds]
+        coefs = COEFS['GSAL2'][inds]
         g2jk = poly2d_der(y, z, dt, dp, coefs, njs)
         for i1 in range(ds):
             g2jk *= .5*(i-2*i1)/salt
         g2 = g2*x + g2jk
         ind -= njk
     # Scale value to match derivatives
-    g = (g1 + g2) / TRED**dt / PRED**dp
+    g = (g0 + g1 + g2) / TRED**dt / PRED**dp
     return g
+
+
+def caladjustedcoefs(write=True):
+    """Calculate the adjusted coefficients for the Gibbs functions.
+
+    Calculate the adjusted coefficients for the Gibbs functions of pure water
+    and salt. Using the new coefficients, the following conditions are
+    satisfied to within the current numerical precision:
+        - The entropy and internal energy of pure water are 0 at the triple
+          point temperature (273.16 K) and pressure (611.657 Pa); and
+        - The entropy and enthalpy of seawater are 0 under standard salinity
+          (35.16504 g kg-1), temperature (273.15 K) and pressure (101325 Pa).
+
+    Arguments:
+        write (bool, optional): If True (default) and the adjusted coefficients
+            are not listed in `coefs.txt`, then the values calculated here will
+            be appended. If False or if the entries already exist, nothing will
+            be done.
+
+    Returns:
+        gw00_true, gw10_true, gs100_true, gs110_true (float): The adjusted
+            values for these coefficients in the Gibbs polynomial.
+    """
+    # Gibbs function for pure water
+    gw00_orig, gw10_orig = COEFS['GWAT0_ORIG'][:2]
+    ttp = TTP - TCELS
+    ptp = (PTP - PATM)/DBAR2PA
+    gwt_orig = gibbs_wat(ttp, ptp, 0, 0, orig=True)
+    etawt_orig = -gibbs_wat(ttp, ptp, 1, 0, orig=True)
+    volwt_orig = gibbs_wat(ttp, ptp, 0, 1, orig=True)
+    uwt_orig = gwt_orig + TTP*etawt_orig - PTP/DBAR2PA*volwt_orig
+    gw10_true = gw10_orig + TRED*etawt_orig
+    gw00_true = gw00_orig + TCELS*etawt_orig + uwt_orig
+
+    # Gibbs function for salt
+    gs100_orig, gs110_orig = COEFS['GSAL1_ORIG'][:2]
+    gs0_curr = gibbs_sal(SAL0, 0., 0., 0, 0, 0, orig=True)
+    etas0_curr = -gibbs_sal(SAL0, 0., 0., 0, 1, 0, orig=True)
+    gs110_true = gs110_orig + SRED/SAL0*(TRED*etas0_curr - gw10_true)
+    gs100_true = gs100_orig - SRED/SAL0*(gw00_true + gs0_curr)
+
+    # Write outputs
+    if write:
+        fmt = '{:+21.14e}'
+        names = ('GWAT0_TRUE', 'GSAL1_TRUE')
+        coefs = ((gw00_true, gw10_true), (gs100_true, gs110_true))
+        for (name, cs) in zip(names, coefs):
+            if name not in COEFS:
+                with open('coefs.txt', mode='at') as f:
+                    f.write(f'{name}\n  ')
+                    f.write(', '.join(fmt.format(c) for c in cs))
+                    f.write('\n')
+    return (gw00_true, gw10_true, gs100_true, gs110_true)
 
 
 # Main script: Run doctest
