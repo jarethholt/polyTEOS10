@@ -659,6 +659,7 @@ def gibbs_sal(salt, temp, pres, ds, dt, dp, orig=False):
             (J kg-1) / (g kg-1)^ds / (deg C)^dt / (dbar)^dp.
     """
     # Special case: zero salinity
+    """
     if salt == 0.:
         # Can only have specific derivatives
         if any(isinstance(x, np.ndarray) for x in (salt, temp, pres)):
@@ -685,6 +686,7 @@ def gibbs_sal(salt, temp, pres, ds, dt, dp, orig=False):
             else:
                 g = np.nan*out
                 return g
+    """
 
     # Calculate reduced variables
     x = (salt / SRED)**.5
