@@ -42,7 +42,7 @@ DTASBSQ = 32.  # Salinity offset for Boussinesq formulation, g kg-1
 DTASCMP = 24.  # Salinity offset for compressile formulation, g kg-1
 TTP = 273.16  # Triple point temperature in K
 PTP = 611.657  # Triple point pressure in Pa
-
+SMIN = 1e-8  # Minimum salinity for calculating logarithm, g kg-1
 
 # Number of terms in each polynomial expansion
 NSTBSQ = (6, 4, 2, 1)
@@ -690,27 +690,29 @@ def gibbs_sal(salt, temp, pres, ds, dt, dp, orig=False):
 
     # Calculate reduced variables
     x = (salt / SRED)**.5
+    salt0 = np.maximum(salt, SMIN)
+    smask = (salt == 0)
     y = temp / TRED
     z = pres / PRED
     # Calculate logarithmic salinity term
     g0yz = poly2d_der(y, z, dt, dp, COEFS['GSAL0'], (1,))/2/SRED
     if ds == 0:
-        g0 = g0yz * salt * np.log(salt/SRED)
+        g00 = g0yz * salt*np.log(salt0/SRED)
     elif ds == 1:
-        g0 = g0yz * (1 + np.log(salt/SRED))
+        g00 = g0yz * (1 + np.log(salt0/SRED))
     else:
-        sinv = 1./salt
-        g0 = g0yz * sinv
+        sinv = 1./salt0
+        g00 = g0yz * sinv
         for i in range(1, ds-1):
-            g0 *= -i*sinv
+            g00 *= -i*sinv
     # Calculate the linear, adjustable salinity terms
     if (ds > 1) or (dt > 1) or (dp > 0):
-        g1 = 0.
+        g10 = 0.
     else:
         name1 = 'GSAL1_' + ('ORIG' if orig else 'TRUE')
-        g1 = poly1d_der(y, dt, COEFS[name1]) * salt**(ds == 0) / SRED
+        g10 = poly1d_der(y, dt, COEFS[name1]) * salt**(ds == 0) / SRED
     # Calculate the other salinity terms
-    g2 = 0.
+    g20 = 0.
     imax = len(NGSAL2) - 1
     ind = 0
     for (i1, jkmax) in enumerate(NGSAL2[-1::-1]):
@@ -721,11 +723,29 @@ def gibbs_sal(salt, temp, pres, ds, dt, dp, orig=False):
         coefs = COEFS['GSAL2'][inds]
         g2jk = poly2d_der(y, z, dt, dp, coefs, njs)
         for i1 in range(ds):
-            g2jk *= .5*(i-2*i1)/salt
-        g2 = g2*x + g2jk
+            g2jk *= .5*(i-2*i1)/salt0
+        g20 = g20*x + g2jk
         ind -= njk
+    # Adjust results for zero salinity cases
+    g = (g00 + g10 + g20) * (1-smask)
+    if np.any(smask):
+        if ds == 0:
+            pass  # g=0 when salt=0
+        elif ds > 1:
+            g += np.nan * smask
+        else:
+            if (dt > 1) or (dp > 0):
+                # Use g2 only
+                jkmax = NGSAL2[2]
+                njs = tuple((jkmax-k) for k in range(jkmax+1))
+                njk = ((jkmax+1)*(jkmax+2))//2
+                coefs = COEFS['GSAL2'][4:njk+4]
+                g21 = poly2d_der(y, z, dt, dp, coefs, njs) / SRED
+                g += g21 * smask
+            else:
+                g += np.nan * smask
     # Scale value to match derivatives
-    g = (g0 + g1 + g2) / TRED**dt / PRED**dp
+    g /= TRED**dt * PRED**dp
     return g
 
 
