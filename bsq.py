@@ -24,7 +24,50 @@ with np.load(NPZFILE) as cdata:
                                  'STIF1', 'ijmaxs_STIF1')]
 
 
-# Functions
+# Equation of state functions
+def eos_bsq0(dpth):
+    """Calculate Boussinesq density reference profile.
+
+    Calculate the reference profile for Boussinesq density, i.e. the principal
+    component of density that depends only on depth.
+
+    Arguments:
+        dpth (float or array): Seawater depth in m; equivalently, seawater
+            reference hydrostatic pressure in dbar.
+
+    Returns:
+        r0 (float or array): Density in kg m-3.
+        r0z (float or array): Derivative of density with respect to depth, in
+            units of kg m-3 m-1.
+    """
+    zet = dpth / ZRED
+    r0, r0z = aux.poly1d_1der(zet, CBSQ0)
+    return (r0, r0z)
+
+
+def eos_bsq1(salt, tcon, dpth):
+    """Calculate Boussinesq density anomaly.
+
+    Calculate the anomaly from the reference profile for Boussinesq density.
+
+    Arguments:
+        salt (float or array): Absolute salinity in g kg-1.
+        tcon (float or array): Conservative temperature in degrees Celsius.
+        dpth (float or array): Seawater depth in m; equivalently, seawater
+            reference hydrostatic pressure in dbar.
+
+    Returns:
+        r1 (float or array): Density anomaly in kg m-3.
+        r1s, r1t, r1z (float or array): Derivatives of the density anomaly with
+            respect to salinity, temperature, and depth.
+    """
+    sig = ((salt+DTASBSQ)/SRED)**.5
+    tau = tcon / TRED
+    zet = dpth / ZRED
+    r1, r1s, r1t, r1z = aux.poly3d_1der(sig, tau, zet, CBSQ1, IJBSQ)
+    return (r1, r1s, r1t, r1z)
+
+
 def eos_bsq(salt, tcon, dpth):
     """Calculate Boussinesq density.
 
@@ -58,23 +101,60 @@ def eos_bsq(salt, tcon, dpth):
      0.7655553707894517,
      1500.2086843982124)
     """
-    # Reduced variables
-    sig = ((salt+DTASBSQ)/SRED)**.5
-    tau = tcon / TRED
-    zet = dpth / ZRED
-
-    # Vertical reference profile of density
-    r0, r0z = aux.poly1d_1der(zet, CBSQ0)
-
-    # Density anomaly
-    r1, r1s, r1t, r1z = aux.poly3d_1der(sig, tau, zet, CBSQ1, IJBSQ)
+    # Calculate reference profile and anomaly of density
+    r0, r0z = eos_bsq0(dpth)
+    r1, r1s, r1t, r1z = eos_bsq1(salt, tcon, dpth)
 
     # Calculate physically-relevant quantities
     rho = r0 + r1
     absq = -r1t/TRED
-    bbsq = r1s/(2*sig*SRED)
+    bbsq = r1s / (2 * ((salt+DTASBSQ)*SRED)**.5)
     csnd = (RHOBSQ*GRAV*ZRED/(r0z + r1z))**.5
     return (rho, absq, bbsq, csnd)
+
+
+def eos_stif0(dpth):
+    """Calculate stiffened density reference profile.
+
+    Calculate the reference profile of stiffened Boussinesq density, i.e. the
+    principal depth-dependent component.
+
+    Arguments:
+        dpth (float or array): Seawater depth in m; equivalently, seawater
+            reference hydrostatic pressure in dbar.
+
+    Returns:
+        r1 (float or array): Reference profile of density in kg m-3.
+        r1z (float or array): Derivative of the reference profile with respect
+            to depth, in units of kg m-3 m-1.
+    """
+    zet = dpth / ZRED
+    r1, r1z = aux.poly1d_1der(zet, CSTIF0)
+    return (r1, r1z)
+
+
+def eos_stif1(salt, tcon, dpth):
+    """Calculate stiffened density scaling factor.
+
+    Calculate the scaling factor of the stiffened density, the multiplicative
+    correction to the reference profile due to salinity and temperature.
+
+    Arguments:
+        salt (float or array): Absolute salinity in g kg-1.
+        tcon (float or array): Conservative temperature in degrees Celsius.
+        dpth (float or array): Seawater depth in m; equivalently, seawater
+            reference hydrostatic pressure in dbar.
+
+    Returns:
+        rdot (float or array): Density scaling factor, unitless.
+        rdots, rdott, rdotz (float or array): Derivatives of the scaling factor
+            with respect to salinity, temperature, and depth.
+    """
+    sig = ((salt+DTASBSQ)/SRED)**.5
+    tau = tcon / TRED
+    zet = dpth / ZRED
+    rdot, rdots, rdott, rdotz = aux.poly3d_1der(sig, tau, zet, CSTIF1, IJSTIF)
+    return (rdot, rdots, rdott, rdotz)
 
 
 def eos_stif(salt, tcon, dpth):
@@ -110,26 +190,20 @@ def eos_stif(salt, tcon, dpth):
      0.7655544988472869,
      1500.2088411949183)
     """
-    # Reduced variables
-    sig = ((salt+DTASBSQ)/SRED)**.5
-    tau = tcon / TRED
-    zet = dpth / ZRED
-
-    # Vertical reference profile of density
-    r1, r1z = aux.poly1d_1der(zet, CSTIF0)
-
-    # Normalized density
-    rdot, rdots, rdott, rdotz = aux.poly3d_1der(sig, tau, zet, CSTIF1, IJSTIF)
+    # Calculate reference profile and scaling factor
+    r1, r1z = eos_stif0(dpth)
+    rdot, rdots, rdott, rdotz = eos_stif1(salt, tcon, dpth)
 
     # Return all physical quantities
     rho = r1 * rdot
     absq = -r1/TRED * rdott
-    bbsq = r1/(2*sig*SRED) * rdots
+    bbsq = r1*rdots / (2 * ((salt+DTASBSQ)*SRED)**.5)
     csnd = (RHOBSQ*GRAV*ZRED/(rdot*r1z + r1*rdotz))**.5
     return (rho, absq, bbsq, csnd)
 
 
-def calnsq(absq, bbsq, dctdz, dsadz):
+# Additional functions
+def stratification(absq, bbsq, dctdz, dsadz):
     """Calculate the Boussinesq stratification.
 
     Calculate the square of the buoyancy frequency for a Boussinesq system,
@@ -157,19 +231,79 @@ def calnsq(absq, bbsq, dctdz, dsadz):
 
     Examples
     --------
-    >>> calnsq(.18,.77,2e-3,-5e-3)
+    >>> stratification(.18,.77,2e-3,-5e-3)
     4.0476467156862744e-05
 
     >>> __, absq, bbsq, __ = eos_bsq(30.,10.,1e3)
-    >>> calnsq(absq,bbsq,2e-3,-5e-3)
+    >>> stratification(absq,bbsq,2e-3,-5e-3)
     4.025600421032772e-05
 
     >>> __, absq, bbsq, __ = eos_stif(30.,10.,1e3)
-    >>> calnsq(absq,bbsq,2e-3,-5e-3)
+    >>> stratification(absq,bbsq,2e-3,-5e-3)
     4.0256022377087266e-05
     """
     nsq = GRAV/RHOBSQ * (absq*dctdz - bbsq*dsadz)
     return nsq
+
+
+def potenergy_bsq0(dpth):
+    """Calculate the Boussinesq potential energy reference profile.
+
+    Calculate the potential energy in the Boussinesq case corresponding to the
+    reference profile of density.
+
+    Arguments:
+        dpth (float or array): Seawater depth in m; equivalently, seawater
+            reference hydrostatic pressure in dbar.
+
+    Returns:
+        epot0 (float or array): Potential energy in J m-3.
+    """
+    # Construct coefficients of depth integral
+    kmax = CBSQ0.size - 1
+    cep0 = np.zeros(kmax+2)
+    cep0[1:] = CBSQ0 / np.arange(1, kmax+2)
+
+    # Evaluate polynomial
+    zet = dpth / ZRED
+    epot0 = aux.poly1d(zet, cep0) * ZRED
+    return epot0
+
+
+def potenergy_bsq1(salt, tcon, dpth):
+    """Calculate the Boussinesq potential energy anomaly.
+
+    Calculate the potential energy in the Boussinesq case corresponding to the
+    density anomaly.
+
+    Arguments:
+        salt (float or array): Absolute salinity in g kg-1.
+        tcon (float or array): Conservative temperature in degrees Celsius.
+        dpth (float or array): Seawater depth in m; equivalently, seawater
+            reference hydrostatic pressure in dbar.
+
+    Returns:
+        epot1 (float or array): Potential energy in J m-3.
+    """
+    # Construct coefficients of the depth integral
+    kmax = IJBSQ.size - 1
+    ijep1 = np.zeros(kmax+2, dtype=int)
+    ijep1[1:] = IJBSQ
+    cep1 = np.zeros(CBSQ1.size+1)
+    cep1[1:] = CBSQ1
+    ind = 1
+    for k in range(1, kmax+2):
+        ijmax = ijep1[k]
+        nij = (ijmax+1)*(ijmax+2)//2
+        cep1[ind:ind+nij] /= k
+        ind += nij
+
+    # Evaluate polynomial
+    sig = ((salt+DTASBSQ)/SRED)**.5
+    tau = tcon / TRED
+    zet = dpth / ZRED
+    epot1 = aux.poly3d(sig, tau, zet, cep1, ijep1) * ZRED
+    return epot1
 
 
 # Main script: Run doctest
